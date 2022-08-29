@@ -46,7 +46,6 @@ Version 3.2:  Fixed logic to explicitly install NuGet (silently).
 Version 3.3:  Added more logging and error handling for group membership.
 Version 3.4:  Added logic to verify that devices were added successfully.  Fixed a bug that could cause all Autopilot devices to be added to the specified AAD group.
 Version 3.5:  Added logic to display the serial number of the gathered device.
-Version 3.6:  Added ability to use AddToGroup with AppID & AppSecret and migration some functions to Graph Powershell v1.0
 #>
 
 <#
@@ -139,82 +138,47 @@ Begin
 	# If online, make sure we are able to authenticate
 	if ($Online) {
 
-		# Check PSGallery
-        $gallery = Get-PSRepository -Name "PSGallery" -ErrorAction Ignore
-        if (-not $gallery) {
-            #https://stackoverflow.com/a/62456701
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            Register-PSRepository -Default -Verbose
-            Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
-        }
-
-        # Get NuGet
+		# Get NuGet
 		$provider = Get-PackageProvider NuGet -ErrorAction Ignore
 		if (-not $provider) {
 			Write-Host "Installing provider NuGet"
-            Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies -MinimumVersion 2.8.5.201
+			Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies
 		}
+		
+		# Get WindowsAutopilotIntune module (and dependencies)
+		$module = Import-Module WindowsAutopilotIntune -PassThru -ErrorAction Ignore
+		if (-not $module) {
+			Write-Host "Installing module WindowsAutopilotIntune"
+			Install-Module WindowsAutopilotIntune -Force
+		}
+		Import-Module WindowsAutopilotIntune -Scope Global
 
-		# Install and connect to Graph
-        $modules = 'WindowsAutopilotIntune','Microsoft.Graph.Authentication', 'Microsoft.Graph.Intune', 'Microsoft.Graph.DeviceManagement'
-        $scopes = 'DeviceManagementServiceConfig.ReadWrite.All','DeviceManagementManagedDevices.ReadWrite.All','Device.Read.All'
-
-        # If using AddToGroup, we need extra modules and scopes
+		# Get Azure AD if needed
 		if ($AddToGroup)
 		{
-            $modules += 'Microsoft.Graph.Groups','Microsoft.Graph.Identity.DirectoryManagement'
-            $scopes += 'GroupMember.ReadWrite.All','Group.Read.All'
-        }
-
-        #Install any missing modules and load them
-        $modules | ForEach-Object {
-            $module = Get-Module -Name $_ -ErrorAction Ignore
-            if (-not $module) { 
-                Write-Host "Installing module $_"
-                Install-Module $_ -Force -Scope CurrentUser
-            }
-
-            Import-Module $_ -Force
-        }
+			$module = Import-Module AzureAD -PassThru -ErrorAction Ignore
+			if (-not $module)
+			{
+				Write-Host "Installing module AzureAD"
+				Install-Module AzureAD -Force
+			}
+		}
 
 		# Connect
-	    if ($AppId -ne "")
-	    {
-            #Get an access token for the connection
-            #https://blogs.aaddevsup.xyz/2022/06/microsoft-graph-powershell-sdk-use-client-secret-instead-of-certificate-for-service-principal-login/
-            $body = @{
-                grant_type="client_credentials";
-                client_id=$AppId;
-                client_secret=$AppSecret;
-                scope="https://graph.microsoft.com/.default";
-            }
- 
-            $response = Invoke-RestMethod -Method Post -Uri https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token -Body $body
-            $accessToken = $response.access_token
-
-		    $graph = Connect-MgGraph -AccessToken $accessToken 
-            $intune = Connect-MSGraphApp -Tenant $TenantId -AppId $AppId -AppSecret $AppSecret
-		    Write-Host "Connected to Graph API tenant $TenantId using app-based authentication"
-	    }
-	    else {
-		    $graph = Connect-MgGraph -Scopes $scopes
-            $intune = Connect-MSGraph
-		    Write-Host "Connected to Graph API tenant $($graph.TenantId)"
-	    }
-
-        #check scopes
-        $scopesOK = $true
-        $currentScopes = Get-MgContext | Select -ExpandProperty Scopes
-        $scopes | % {
-            if (-not ($_ -in $currentScopes)) {
-                Write-Warning "Scope not configured for session: $_"
-                $scopesOK = $false
-            }
-        }
-
-        if (-not $scopesOK) {
-            Throw "Missing scope, script cannot run successfully"
-        }
+		if ($AppId -ne "")
+		{
+			$graph = Connect-MSGraphApp -Tenant $TenantId -AppId $AppId -AppSecret $AppSecret
+			Write-Host "Connected to Intune tenant $TenantId using app-based authentication (Azure AD authentication not supported)"
+		}
+		else {
+			$graph = Connect-MSGraph
+			Write-Host "Connected to Intune tenant $($graph.TenantId)"
+			if ($AddToGroup)
+			{
+				$aadId = Connect-AzureAD -AccountId $graph.UPN
+				Write-Host "Connected to Azure AD tenant $($aadId.TenantId)"
+			}
+		}
 
 		# Force the output to a file
 		if ($OutputFile -eq "")
@@ -426,20 +390,20 @@ End
 		# Add the device to the specified AAD group
 		if ($AddToGroup)
 		{
-			$aadGroup = Get-MgGroup -Filter "DisplayName eq '$AddToGroup'"
+			$aadGroup = Get-AzureADGroup -Filter "DisplayName eq '$AddToGroup'"
 			if ($aadGroup)
 			{
 				$autopilotDevices | % {
-					$aadDevice = Get-MgDevice -Filter "DeviceId eq '$($_.azureActiveDirectoryDeviceId)'"
+					$aadDevice = Get-AzureADDevice -ObjectId "deviceid_$($_.azureActiveDirectoryDeviceId)"
 					if ($aadDevice) {
 						Write-Host "Adding device $($_.serialNumber) to group $AddToGroup"
-                        New-MgGroupMember -GroupId $aadGroup.Id -DirectoryObjectId $aadDevice.Id
+						Add-AzureADGroupMember -ObjectId $aadGroup.ObjectId -RefObjectId $aadDevice.ObjectId
 					}
 					else {
 						Write-Error "Unable to find Azure AD device with ID $($_.azureActiveDirectoryDeviceId)"
 					}
 				}
-				Write-Host "Added devices to group '$AddToGroup' ($($aadGroup.Id))"
+				Write-Host "Added devices to group '$AddToGroup' ($($aadGroup.ObjectId))"
 			}
 			else {
 				Write-Error "Unable to find group $AddToGroup"
