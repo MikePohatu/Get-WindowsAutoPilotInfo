@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 3.5
+.VERSION 3.6
 
 .GUID ebf446a3-3362-4774-83c0-b7299410b63f
 
@@ -90,6 +90,8 @@ Specifies the name of the Azure AD group that the new device should be added to.
 Wait for the Autopilot profile assignment.  (This can take a while for dynamic groups.)
 .PARAMETER Reboot
 Reboot the device after the Autopilot profile has been assigned (necessary to download the profile and apply the computer name, if specified).
+.PARAMETER Delay
+Set a delay in seconds at the end of the script for the user to read the output
 .EXAMPLE
 .\Get-WindowsAutoPilotInfo.ps1 -ComputerName MYCOMPUTER -OutputFile .\MyComputer.csv
 .EXAMPLE
@@ -121,6 +123,7 @@ param(
 	[Parameter(Mandatory=$False)] [System.Management.Automation.PSCredential] $Credential = $null,
 	[Parameter(Mandatory=$False)] [Switch] $Partner = $false,
 	[Parameter(Mandatory=$False)] [Switch] $Force = $false,
+	[Parameter(Mandatory=$False)] [int] $Delay = 1,
 	[Parameter(Mandatory=$True,ParameterSetName = 'Online')] [Switch] $Online = $false,
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $TenantId = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AppId = "",
@@ -138,25 +141,28 @@ Begin
 
 	# If online, make sure we are able to authenticate
 	if ($Online) {
+        # Check Env variables because they might not be set e.g. during a task sequence
+        if ($null -eq $env:APPDATA) { $env:APPDATA = "$($env:UserProfile)\AppData\Roaming" }
+        if ($null -eq $env:LOCALAPPDATA) { $env:LOCALAPPDATA = "$($env:UserProfile)\AppData\Local" }
+
+        #Set TLS 1.2
+        #https://docs.microsoft.com/en-us/powershell/scripting/gallery/installing-psget?view=powershell-7.2
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 		# Check PSGallery
-        $gallery = Get-PSRepository -Name "PSGallery" -ErrorAction Ignore
+        Write-Host "Checking PSGallery"
+        $gallery = Get-PSRepository -Name 'PSGallery' -ErrorAction Ignore
         if (-not $gallery) {
-            #https://stackoverflow.com/a/62456701
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             Register-PSRepository -Default -Verbose
             Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
         }
 
         # Get NuGet
-		$provider = Get-PackageProvider NuGet -ErrorAction Ignore
-		if (-not $provider) {
-			Write-Host "Installing provider NuGet"
-            Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies -MinimumVersion 2.8.5.201
-		}
+        Write-Host "Checking NuGet"
+		Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies -MinimumVersion 2.8.5.208
 
 		# Install and connect to Graph
-        $modules = 'WindowsAutopilotIntune','Microsoft.Graph.Authentication', 'Microsoft.Graph.Intune', 'Microsoft.Graph.DeviceManagement'
+        $modules = 'WindowsAutopilotIntune', 'Microsoft.Graph.Intune', 'Microsoft.Graph.DeviceManagement','Microsoft.Graph.Authentication'
         $scopes = 'DeviceManagementServiceConfig.ReadWrite.All','DeviceManagementManagedDevices.ReadWrite.All','Device.Read.All'
 
         # If using AddToGroup, we need extra modules and scopes
@@ -166,15 +172,20 @@ Begin
             $scopes += 'GroupMember.ReadWrite.All','Group.Read.All'
         }
 
-        #Install any missing modules and load them
+        #Install any missing modules
+        Write-Host "Checking Modules"
         $modules | ForEach-Object {
-            $module = Get-Module -Name $_ -ErrorAction Ignore
+            $module = Get-InstalledModule -Name $_ -ErrorAction Ignore
             if (-not $module) { 
                 Write-Host "Installing module $_"
-                Install-Module $_ -Force -Scope CurrentUser
+                Install-Module $_ -Force -ErrorAction Ignore
             }
+        }
 
-            Import-Module $_ -Force
+        #Load the modules        
+        Write-Host "Importing Modules"
+        $modules | ForEach-Object {
+            Import-Module $_
         }
 
 		# Connect
@@ -368,7 +379,10 @@ End
 		}
 
 		# Wait until the devices have been imported
-		$processingCount = 1
+		$processingCount = 999999
+        $activity =  "Waiting for devices to be imported" 
+        $progress = ""
+
 		while ($processingCount -gt 0)
 		{
 			$current = @()
@@ -380,13 +394,17 @@ End
 				}
 				$current += $device
 			}
-			$deviceCount = $imported.Length
-			Write-Host "Waiting for $processingCount of $deviceCount to be imported"
+            
+            $progress = $progress + "*"
+			Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($imported.count)" -Status $progress
 			if ($processingCount -gt 0){
 				Start-Sleep 30
 			}
 		}
-		$importDuration = (Get-Date) - $importStart
+        Write-Progress -Activity $activity -Completed
+		
+		
+        $importDuration = (Get-Date) - $importStart
 		$importSeconds = [Math]::Ceiling($importDuration.TotalSeconds)
 		$successCount = 0
 		$current | % {
@@ -399,7 +417,10 @@ End
 		
 		# Wait until the devices can be found in Intune (should sync automatically)
 		$syncStart = Get-Date
-		$processingCount = 1
+		$processingCount = 999999
+		$activity =  "Waiting for devices to be synced" 
+		$progress = ""
+
 		while ($processingCount -gt 0)
 		{
 			$autopilotDevices = @()
@@ -413,8 +434,10 @@ End
 					$autopilotDevices += $device
 				}	
 			}
-			$deviceCount = $autopilotDevices.Length
-			Write-Host "Waiting for $processingCount of $deviceCount to be synced"
+
+            $progress = $progress + "*"
+			Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($current.Length)" -Status $progress
+			
 			if ($processingCount -gt 0){
 				Start-Sleep 30
 			}
@@ -458,8 +481,11 @@ End
 		if ($Assign)
 		{
 			$assignStart = Get-Date
-			$processingCount = 1
-			while ($processingCount -gt 0)
+			$processingCount = 999999
+			$progress = ""
+			$activity = "Waiting for devices to be assigned"
+			
+            while ($processingCount -gt 0)
 			{
 				$processingCount = 0
 				$autopilotDevices | % {
@@ -468,15 +494,22 @@ End
 						$processingCount = $processingCount + 1
 					}
 				}
-				$deviceCount = $autopilotDevices.Length
-				Write-Host "Waiting for $processingCount of $deviceCount to be assigned"
-				if ($processingCount -gt 0){
+
+				$progress = $progress + "*"
+				Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($imported.count)" -Status $progress
+				
+				
+				if ($currentProcessingCount -gt 0){
 					Start-Sleep 30
 				}	
 			}
+			Write-Progress -Activity $activity -Completed
+
 			$assignDuration = (Get-Date) - $assignStart
 			$assignSeconds = [Math]::Ceiling($assignDuration.TotalSeconds)
 			Write-Host "Profiles assigned to all devices.  Elapsed time to complete assignment: $assignSeconds seconds"	
+
+            	Start-Sleep -Seconds $Delay
 			if ($Reboot)
 			{
 				Restart-Computer -Force
