@@ -86,6 +86,8 @@ Add computers to Windows Autopilot via the Intune Graph API
 An optional value specifying the computer name to be assigned to the device.  This can only be specified with the -Online switch and only works with AAD join scenarios.
 .PARAMETER AddToGroup
 Specifies the name of the Azure AD group that the new device should be added to.
+.PARAMETER RemoveGroups
+Removes membership for any Azure AD groups where the device is an assigned member (runs before AddToGroup)
 .PARAMETER Assign
 Wait for the Autopilot profile assignment.  (This can take a while for dynamic groups.)
 .PARAMETER Reboot
@@ -129,6 +131,7 @@ param(
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AppId = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AppSecret = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AddToGroup = "",
+    [Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $RemoveGroups = $false,
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AssignedComputerName = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $Assign = $false, 
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $Reboot = $false
@@ -385,14 +388,14 @@ End
 
 		while ($processingCount -gt 0)
 		{
-			$current = @()
+			$apImportedDevices = @()
 			$processingCount = 0
 			$imported | % {
 				$device = Get-AutopilotImportedDevice -id $_.id
 				if ($device.state.deviceImportStatus -eq "unknown") {
 					$processingCount = $processingCount + 1
 				}
-				$current += $device
+				$apImportedDevices += $device
 			}
             
             $progress = $progress + "*"
@@ -407,7 +410,7 @@ End
         $importDuration = (Get-Date) - $importStart
 		$importSeconds = [Math]::Ceiling($importDuration.TotalSeconds)
 		$successCount = 0
-		$current | % {
+		$apImportedDevices | % {
 			Write-Host "$($device.serialNumber): $($device.state.deviceImportStatus) $($device.state.deviceErrorCode) $($device.state.deviceErrorName)"
 			if ($device.state.deviceImportStatus -eq "complete") {
 				$successCount = $successCount + 1
@@ -425,14 +428,24 @@ End
 		{
 			$autopilotDevices = @()
 			$processingCount = 0
-			$current | % {
-				if ($device.state.deviceImportStatus -eq "complete") {
-					$device = Get-AutopilotDevice -id $_.state.deviceRegistrationId
-					if (-not $device) {
-						$processingCount = $processingCount + 1
-					}
-					$autopilotDevices += $device
-				}	
+			$apImportedDevices | % {
+                if ($_.state.deviceRegistrationId) {
+                    $device = Get-AutopilotDevice -id $_.state.deviceRegistrationId
+                    if ($_.state.deviceImportStatus -eq "complete") {
+					    if (-not $device) {
+						    $processingCount = $processingCount + 1
+					    }
+                    } 
+                }
+                #If the device hasn't returned the deviceRegistrationId it might have errored 
+                #because it already exists. Find it by the serial instead
+                elseif ($_.state.deviceErrorName -eq 'ZtdDeviceAlreadyAssigned') {
+                    $device = Get-AutopilotDevice -serial $_.serialNumber
+                }
+
+                if ($device) {
+                    $autopilotDevices += $device
+                }		
 			}
 
             $progress = $progress + "*"
@@ -442,31 +455,66 @@ End
 				Start-Sleep 30
 			}
 		}
+        Write-Progress -Activity $activity -Completed
 		$syncDuration = (Get-Date) - $syncStart
 		$syncSeconds = [Math]::Ceiling($syncDuration.TotalSeconds)
 		Write-Host "All devices synced.  Elapsed time to complete sync: $syncSeconds seconds"
-
-		# Add the device to the specified AAD group
-		if ($AddToGroup)
+        
+		# Run group management tasks
+		if ($AddToGroup -or $RemoveGroups)
 		{
-			$aadGroup = Get-MgGroup -Filter "DisplayName eq '$AddToGroup'"
-			if ($aadGroup)
-			{
-				$autopilotDevices | % {
-					$aadDevice = Get-MgDevice -Filter "DeviceId eq '$($_.azureActiveDirectoryDeviceId)'"
-					if ($aadDevice) {
-						Write-Host "Adding device $($_.serialNumber) to group $AddToGroup"
+            Write-Host "Runnging group management tasks"
+            if ($AddToGroup) {   
+			    $aadGroup = Get-MgGroup -Filter "DisplayName eq '$AddToGroup'"
+                if ($aadGroup) {
+                    Write-Host "Devices will be added to group: '$AddToGroup' ($($aadGroup.Id))"	
+                }
+                else {
+				    Write-Error "Unable to find group $AddToGroup"
+			    }
+            }	
+
+                        		
+            $groupList = @{}
+            $autopilotDevices | % {
+                $apDevice = $_
+                $aadDevice = Get-MgDevice -Filter "DeviceId eq '$($apDevice.azureActiveDirectoryDeviceId)'"
+                if ($aadDevice) {
+                    Write-Verbose " Device ID: $($aadDevice.Id)"
+
+                    #Run group cleanup
+                    if ($RemoveGroups) {
+                        $groupIds = Get-MgDeviceMemberOf -DeviceId $aadDevice.Id 
+				        $groupIds | ForEach-Object {
+                            $group = $groupList[$_.Id]
+                            if (-not $group) {
+                                $group = Get-MgGroup -GroupId $_.Id
+                                $groupList.Add($_.Id, $group)
+                            }
+
+                            if ($group) {
+                                if ($group.GroupTypes -notcontains 'DynamicMembership') {
+                                    Write-Host " Removing group membership for device $($apDevice.serialNumber): $($group.DisplayName)" -ForegroundColor Yellow
+					                Remove-MgGroupMemberByRef -GroupId $_.Id -DirectoryObjectId $aadDevice.Id
+                                }
+                            }
+                            else {
+                                Write-Error "Problem getting group: $($_.Id)"
+                            }
+				        }
+                    }
+
+                    #Add to device to the specified group
+                    if ($aadGroup)
+			        {
+						Write-Host " Adding device $($apDevice.serialNumber) to group '$AddToGroup'" -ForegroundColor Blue
                         New-MgGroupMember -GroupId $aadGroup.Id -DirectoryObjectId $aadDevice.Id
-					}
-					else {
-						Write-Error "Unable to find Azure AD device with ID $($_.azureActiveDirectoryDeviceId)"
-					}
+			        }
+                }
+				else {
+					Write-Error "Unable to find Azure AD device with ID $($_.azureActiveDirectoryDeviceId)"
 				}
-				Write-Host "Added devices to group '$AddToGroup' ($($aadGroup.Id))"
-			}
-			else {
-				Write-Error "Unable to find group $AddToGroup"
-			}
+            }
 		}
 
 		# Assign the computer name 
@@ -509,7 +557,11 @@ End
 			$assignSeconds = [Math]::Ceiling($assignDuration.TotalSeconds)
 			Write-Host "Profiles assigned to all devices.  Elapsed time to complete assignment: $assignSeconds seconds"	
 
-            	Start-Sleep -Seconds $Delay
+            for ($i = 1 ; $i -le $Delay ; $i++) {
+                Write-Progress -Activity "Finished" -PercentComplete (($i / $Delay) * 100) -Status "Closing in $($Delay - $i) seconds"
+                Start-Sleep -Seconds 1
+            }
+
 			if ($Reboot)
 			{
 				Restart-Computer -Force
