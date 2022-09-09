@@ -501,7 +501,7 @@ End
 
                             if ($group) {
                                 if ($group.GroupTypes -notcontains 'DynamicMembership') {
-                                    Write-Host " Removing group membership for device $($apDevice.serialNumber): $($group.DisplayName)" -ForegroundColor Yellow
+                                    Write-Host " Removing group membership for device $($apDevice.serialNumber): '$($group.DisplayName)'" -ForegroundColor Yellow
 					                Remove-MgGroupMemberByRef -GroupId $_.Id -DirectoryObjectId $aadDevice.Id
                                 }
                             }
@@ -542,7 +542,7 @@ End
             if ($ExpectedProfile) {
                 Write-Host "Checking for AutoPilot profile $ExpectedProfile"
                 $apProfile = Get-AutopilotProfile | Where { $_.displayName -eq $ExpectedProfile }
-                $activity = "Waiting for devices to be assigned to $ExpectedProfile"
+                $activity = "Waiting for devices to be assigned to '$ExpectedProfile'"
             }
             else {
                 $activity = "Waiting for devices to be assigned"
@@ -558,7 +558,7 @@ End
 
                 $autopilotDevices | % {
 					$device = Get-AutopilotDevice -id $_.id -Expand
-                    Write-Host "Checking device: $($_.id)"
+                    Write-Verbose "Checking device: $($_.id)"
 
                     #Check if device is in the right profile
                     if ($profileDeviceIds -and $device.id -notin $profileDeviceIds) {
