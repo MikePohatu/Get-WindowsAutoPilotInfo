@@ -90,6 +90,8 @@ Specifies the name of the Azure AD group that the new device should be added to.
 Removes membership for any Azure AD groups where the device is an assigned member (runs before AddToGroup)
 .PARAMETER Assign
 Wait for the Autopilot profile assignment.  (This can take a while for dynamic groups.)
+.PARAMETER ExpectedProfile
+The Autopilot profile that is expected to be assigned. The script will wait for this update. Requires -Assign (This can take a while for dynamic groups.)
 .PARAMETER Reboot
 Reboot the device after the Autopilot profile has been assigned (necessary to download the profile and apply the computer name, if specified).
 .PARAMETER Delay
@@ -133,7 +135,12 @@ param(
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AddToGroup = "",
     [Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $RemoveGroups = $false,
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AssignedComputerName = "",
-	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $Assign = $false, 
+	[Parameter(Mandatory=$False,ParameterSetName = 'Online')]
+    [Parameter(Mandatory=$True,ParameterSetName = 'Assign')]
+        [Switch] $Assign = $false,
+    [Parameter(Mandatory=$False,ParameterSetName = 'Online')]
+    [Parameter(Mandatory=$False,ParameterSetName = 'Assign')]
+        [string] $ExpectedProfile, 
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $Reboot = $false
 )
 
@@ -384,7 +391,7 @@ End
 		# Wait until the devices have been imported
 		$processingCount = 999999
         $activity =  "Waiting for devices to be imported" 
-        $progress = ""
+        $progress = 0
 
 		while ($processingCount -gt 0)
 		{
@@ -398,8 +405,8 @@ End
 				$apImportedDevices += $device
 			}
             
-            $progress = $progress + "*"
-			Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($imported.count)" -Status $progress
+            $progress = $progress+1
+			Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($imported.count)" -PercentComplete $progress
 			if ($processingCount -gt 0){
 				Start-Sleep 30
 			}
@@ -422,7 +429,7 @@ End
 		$syncStart = Get-Date
 		$processingCount = 999999
 		$activity =  "Waiting for devices to be synced" 
-		$progress = ""
+		$progress = 0
 
 		while ($processingCount -gt 0)
 		{
@@ -448,8 +455,8 @@ End
                 }		
 			}
 
-            $progress = $progress + "*"
-			Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($current.Length)" -Status $progress
+            $progress = $progress+1
+			Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($current.Length)" -PercentComplete $progress
 			
 			if ($processingCount -gt 0){
 				Start-Sleep 30
@@ -530,24 +537,49 @@ End
 		{
 			$assignStart = Get-Date
 			$processingCount = 999999
-			$progress = ""
-			$activity = "Waiting for devices to be assigned"
-			
+            $progress = 0
+
+            if ($ExpectedProfile) {
+                Write-Host "Checking for AutoPilot profile $ExpectedProfile"
+                $apProfile = Get-AutopilotProfile | Where { $_.displayName -eq $ExpectedProfile }
+                $activity = "Waiting for devices to be assigned to $ExpectedProfile"
+            }
+            else {
+                $activity = "Waiting for devices to be assigned"
+            }
+
             while ($processingCount -gt 0)
 			{
-				$processingCount = 0
-				$autopilotDevices | % {
+                $processingCount = 0
+                if ($ExpectedProfile) {
+                    #Get a list of device ids assigned to the AutoPilot profile to compare against
+                    $profileDeviceIds = $apProfile | Get-AutopilotProfileAssignedDevice | Select -ExpandProperty id
+                }
+
+                $autopilotDevices | % {
 					$device = Get-AutopilotDevice -id $_.id -Expand
-					if (-not ($device.deploymentProfileAssignmentStatus.StartsWith("assigned"))) {
+                    Write-Host "Checking device: $($_.id)"
+
+                    #Check if device is in the right profile
+                    if ($profileDeviceIds -and $device.id -notin $profileDeviceIds) {
+                        Write-Verbose "DeviceID $($_.id) not assigned to profile '$ExpectedProfile'"
+                        $processingCount = $processingCount + 1
+                    }
+                    #Check if profile status is assigned
+                    elseif ((-not ($device.deploymentProfileAssignmentStatus.StartsWith("assigned")))) {
+                        Write-Verbose "DeviceID $($_.id) not assigned"
 						$processingCount = $processingCount + 1
 					}
+                    
+                    else {
+                        Write-Verbose "DeviceID $($_.id) found assigned to profile $ExpectedProfile"
+                    }
 				}
 
-				$progress = $progress + "*"
-				Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($imported.count)" -Status $progress
+                $progress = $progress+1
+				Write-Progress -Activity $activity -CurrentOperation "Processing $processingCount of $($imported.count)" -PercentComplete $progress
 				
-				
-				if ($currentProcessingCount -gt 0){
+				if ($processingCount -gt 0){
 					Start-Sleep 30
 				}	
 			}
