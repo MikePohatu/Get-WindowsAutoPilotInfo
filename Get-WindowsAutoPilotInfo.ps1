@@ -213,13 +213,23 @@ Begin
             $response = Invoke-RestMethod -Method Post -Uri https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token -Body $body
             $accessToken = $response.access_token
 
+            Write-Host "Connecting..."
+            Write-Host " 1. Connecting MgGraph module (for Graph API)"
 		    $graph = Connect-MgGraph -AccessToken $accessToken 
+
+            Write-Host " 2. Connecting MSGraph module (for WindowsAutopilotIntune)"
             $intune = Connect-MSGraphApp -Tenant $TenantId -AppId $AppId -AppSecret $AppSecret
+
 		    Write-Host "Connected to Graph API tenant $TenantId using app-based authentication"
 	    }
 	    else {
+            Write-Host "Connecting..."
+            Write-Host " 1. Connecting MgGraph module (for Graph API)"
 		    $graph = Connect-MgGraph -Scopes $scopes
+
+            Write-Host " 2. Connecting MSGraph module (for WindowsAutopilotIntune)"
             $intune = Connect-MSGraph
+
 		    Write-Host "Connected to Graph API tenant $($graph.TenantId)"
 	    }
 
