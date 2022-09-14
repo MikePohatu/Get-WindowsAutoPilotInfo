@@ -90,8 +90,8 @@ Specifies the name of the Azure AD group that the new device should be added to.
 Removes membership for any Azure AD groups where the device is an assigned member (runs before AddToGroup)
 .PARAMETER Assign
 Wait for the Autopilot profile assignment.  (This can take a while for dynamic groups.)
-.PARAMETER ExpectedProfile
-The Autopilot profile that is expected to be assigned. The script will wait for this update. Requires -Assign (This can take a while for dynamic groups.)
+.PARAMETER WaitForProfile
+Wait for the correct Autopilot profile to be assigned. Requires -Assign (This can take a while for dynamic groups.)
 .PARAMETER Reboot
 Reboot the device after the Autopilot profile has been assigned (necessary to download the profile and apply the computer name, if specified).
 .PARAMETER Delay
@@ -140,7 +140,7 @@ param(
         [Switch] $Assign = $false,
     [Parameter(Mandatory=$False,ParameterSetName = 'Online')]
     [Parameter(Mandatory=$False,ParameterSetName = 'Assign')]
-        [string] $ExpectedProfile, 
+        [string] $WaitForProfile, 
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $Reboot = $false
 )
 
@@ -549,10 +549,10 @@ End
 			$processingCount = 999999
             $progress = 0
 
-            if ($ExpectedProfile) {
-                Write-Host "Checking for AutoPilot profile $ExpectedProfile"
-                $apProfile = Get-AutopilotProfile | Where { $_.displayName -eq $ExpectedProfile }
-                $activity = "Waiting for devices to be assigned to '$ExpectedProfile'"
+            if ($WaitForProfile) {
+                Write-Host "Checking for AutoPilot profile $WaitForProfile"
+                $apProfile = Get-AutopilotProfile | Where { $_.displayName -eq $WaitForProfile }
+                $activity = "Waiting for devices to be assigned to '$WaitForProfile'"
             }
             else {
                 $activity = "Waiting for devices to be assigned"
@@ -561,7 +561,7 @@ End
             while ($processingCount -gt 0)
 			{
                 $processingCount = 0
-                if ($ExpectedProfile) {
+                if ($WaitForProfile) {
                     #Get a list of device ids assigned to the AutoPilot profile to compare against
                     $profileDeviceIds = $apProfile | Get-AutopilotProfileAssignedDevice | Select -ExpandProperty id
                 }
@@ -572,7 +572,7 @@ End
 
                     #Check if device is in the right profile
                     if ($profileDeviceIds -and $device.id -notin $profileDeviceIds) {
-                        Write-Verbose "DeviceID $($_.id) not assigned to profile '$ExpectedProfile'"
+                        Write-Verbose "DeviceID $($_.id) not assigned to profile '$WaitForProfile'"
                         $processingCount = $processingCount + 1
                     }
                     #Check if profile status is assigned
@@ -582,7 +582,7 @@ End
 					}
                     
                     else {
-                        Write-Verbose "DeviceID $($_.id) found assigned to profile $ExpectedProfile"
+                        Write-Verbose "DeviceID $($_.id) found assigned to profile $WaitForProfile"
                     }
 				}
 
