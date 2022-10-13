@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 3.6
+.VERSION 3.7
 
 .GUID ebf446a3-3362-4774-83c0-b7299410b63f
 
@@ -47,6 +47,7 @@ Version 3.3:  Added more logging and error handling for group membership.
 Version 3.4:  Added logic to verify that devices were added successfully.  Fixed a bug that could cause all Autopilot devices to be added to the specified AAD group.
 Version 3.5:  Added logic to display the serial number of the gathered device.
 Version 3.6:  Added ability to use AddToGroup with AppID & AppSecret and migration some functions to Graph Powershell v1.0
+Version 3.7:  Changed AddToGroup to accept a list of group names. Added module version checks
 #>
 
 <#
@@ -85,7 +86,7 @@ Add computers to Windows Autopilot via the Intune Graph API
 .PARAMETER AssignedComputerName
 An optional value specifying the computer name to be assigned to the device.  This can only be specified with the -Online switch and only works with AAD join scenarios.
 .PARAMETER AddToGroup
-Specifies the name of the Azure AD group that the new device should be added to.
+Specifies a list of names of Azure AD groups that the new device should be added to.
 .PARAMETER RemoveGroups
 Removes membership for any Azure AD groups where the device is an assigned member (runs before AddToGroup)
 .PARAMETER Assign
@@ -132,7 +133,7 @@ param(
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $TenantId = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AppId = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AppSecret = "",
-	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AddToGroup = "",
+	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String[]] $AddToGroup = "",
     [Parameter(Mandatory=$False,ParameterSetName = 'Online')] [Switch] $RemoveGroups = $false,
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')] [String] $AssignedComputerName = "",
 	[Parameter(Mandatory=$False,ParameterSetName = 'Online')]
@@ -172,29 +173,38 @@ Begin
 		Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies -MinimumVersion 2.8.5.208
 
 		# Install and connect to Graph
-        $modules = 'WindowsAutopilotIntune', 'Microsoft.Graph.Intune', 'Microsoft.Graph.DeviceManagement','Microsoft.Graph.Authentication'
+        # Define modules and minimum versions
+        $modules = @{
+            'WindowsAutopilotIntune'='5.0'
+            'Microsoft.Graph.Intune'='6.1907.1.0'
+            'Microsoft.Graph.DeviceManagement'='1.12.3'
+            'Microsoft.Graph.Authentication'='1.12.3'
+            }
         $scopes = 'DeviceManagementServiceConfig.ReadWrite.All','DeviceManagementManagedDevices.ReadWrite.All','Device.Read.All'
 
         # If using AddToGroup, we need extra modules and scopes
-		if ($AddToGroup)
+		if ($AddToGroup -or $RemoveGroups)
 		{
-            $modules += 'Microsoft.Graph.Groups','Microsoft.Graph.Identity.DirectoryManagement'
+            $modules.Add('Microsoft.Graph.Groups','1.12.3')
+            $modules.Add('Microsoft.Graph.Identity.DirectoryManagement','1.12.3')
             $scopes += 'GroupMember.ReadWrite.All','Group.Read.All'
         }
 
         #Install any missing modules
         Write-Host "Checking Modules"
-        $modules | ForEach-Object {
-            $module = Get-InstalledModule -Name $_ -ErrorAction Ignore
+        $modules.Keys | ForEach-Object {
+            Write-Host "  $($_)" -NoNewline
+            $module = Get-InstalledModule -Name $_ -MinimumVersion $modules[$_] -ErrorAction Ignore
             if (-not $module) { 
-                Write-Host "Installing module $_"
-                Install-Module $_ -Force -ErrorAction Ignore
+                Write-Host "...installing" -NoNewline
+                Install-Module $_ -Force -MinimumVersion $modules[$_] -AllowClobber
             }
+            Write-Host ""
         }
 
         #Load the modules        
         Write-Host "Importing Modules"
-        $modules | ForEach-Object {
+        $modules.Keys | ForEach-Object {
             Import-Module $_
         }
 
@@ -457,7 +467,7 @@ End
                 #If the device hasn't returned the deviceRegistrationId it might have errored 
                 #because it already exists. Find it by the serial instead
                 elseif ($_.state.deviceErrorName -eq 'ZtdDeviceAlreadyAssigned') {
-                    $device = Get-AutopilotDevice -serial $_.serialNumber
+                    $device = Get-AutopilotDevice -serial "$($_.serialNumber)"
                 }
 
                 if ($device) {
@@ -481,15 +491,21 @@ End
 		if ($AddToGroup -or $RemoveGroups)
 		{
             Write-Host "Runnging group management tasks"
+            #Get the groups listed in AddToGroup and add to a list for later use
             if ($AddToGroup) {   
-			    $aadGroup = Get-MgGroup -Filter "DisplayName eq '$AddToGroup'"
-                if ($aadGroup) {
-                    Write-Host "Devices will be added to group: '$AddToGroup' ($($aadGroup.Id))"	
+                $AddingGroups = @()
+                $AddToGroup | ForEach-Object {
+                    $groupname = $_
+			        $aadGroup = Get-MgGroup -Filter "DisplayName eq '$groupname'" -ErrorAction Ignore
+                    if ($aadGroup) {
+                        Write-Host "Devices will be added to group: '$groupname' ($($aadGroup.Id))"
+                        $AddingGroups += $aadGroup
+                    }
+                    else {
+				        Write-Error "Unable to find group $groupname"
+			        }
                 }
-                else {
-				    Write-Error "Unable to find group $AddToGroup"
-			    }
-            }	
+            }
 
                         		
             $groupList = @{}
@@ -521,11 +537,13 @@ End
 				        }
                     }
 
-                    #Add to device to the specified group
-                    if ($aadGroup)
+                    #Add to device to the specified groups
+                    if ($AddingGroups)
 			        {
-						Write-Host " Adding device $($apDevice.serialNumber) to group '$AddToGroup'" -ForegroundColor Blue
-                        New-MgGroupMember -GroupId $aadGroup.Id -DirectoryObjectId $aadDevice.Id
+                        $AddingGroups | ForEach-Object {
+						    Write-Host " Adding device $($apDevice.serialNumber) to group '$($_.Id)'" -ForegroundColor Blue
+                            New-MgGroupMember -GroupId $_.Id -DirectoryObjectId $aadDevice.Id
+                        }
 			        }
                 }
 				else {
