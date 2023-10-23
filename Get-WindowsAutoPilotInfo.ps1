@@ -170,8 +170,8 @@ Begin
 
         # Get NuGet
         Write-Host "Checking NuGet"
-		Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies -MinimumVersion 2.8.5.208
-
+		Find-PackageProvider -Name 'NuGet' -ForceBootstrap -IncludeDependencies -MinimumVersion 2.8.5.208 -ErrorAction SilentlyContinue
+		
 		# Install and connect to Graph
         # Define modules and minimum versions
         $modules = @{
@@ -225,7 +225,13 @@ Begin
 
             Write-Host "Connecting..."
             Write-Host " 1. Connecting MgGraph module (for Graph API)"
-		    $graph = Connect-MgGraph -AccessToken $accessToken 
+			$targetParameter = (Get-Command Connect-MgGraph).Parameters['AccessToken']
+			if ($targetParameter.ParameterType -eq [securestring]){
+				$graph = Connect-MgGraph -AccessToken ($accessToken |ConvertTo-SecureString -AsPlainText -Force)
+			}
+			else {
+				$graph = Connect-MgGraph -AccessToken $accessToken
+			}
 
             Write-Host " 2. Connecting MSGraph module (for WindowsAutopilotIntune)"
             $intune = Connect-MSGraphApp -Tenant $TenantId -AppId $AppId -AppSecret $AppSecret
