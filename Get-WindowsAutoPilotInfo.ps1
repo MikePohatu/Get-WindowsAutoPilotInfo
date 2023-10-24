@@ -48,6 +48,7 @@ Version 3.4:  Added logic to verify that devices were added successfully.  Fixed
 Version 3.5:  Added logic to display the serial number of the gathered device.
 Version 3.6:  Added ability to use AddToGroup with AppID & AppSecret and migration some functions to Graph Powershell v1.0
 Version 3.7:  Changed AddToGroup to accept a list of group names. Added module version checks
+Version 3.8:  Fixed bugs caused by changes to the dependent modules
 #>
 
 <#
@@ -175,18 +176,18 @@ Begin
 		# Install and connect to Graph
         # Define modules and minimum versions
         $modules = @{
+            'Microsoft.Graph.Authentication'='2.8.0'
+            'Microsoft.Graph.DeviceManagement'='2.8.0'
             'WindowsAutopilotIntune'='5.0'
             'Microsoft.Graph.Intune'='6.1907.1.0'
-            'Microsoft.Graph.DeviceManagement'='1.12.3'
-            'Microsoft.Graph.Authentication'='1.12.3'
             }
         $scopes = 'DeviceManagementServiceConfig.ReadWrite.All','DeviceManagementManagedDevices.ReadWrite.All','Device.Read.All'
 
         # If using AddToGroup, we need extra modules and scopes
 		if ($AddToGroup -or $RemoveGroups)
 		{
-            $modules.Add('Microsoft.Graph.Groups','1.12.3')
-            $modules.Add('Microsoft.Graph.Identity.DirectoryManagement','1.12.3')
+            $modules.Add('Microsoft.Graph.Groups','2.8.0')
+            $modules.Add('Microsoft.Graph.Identity.DirectoryManagement','2.8.0')
             $scopes += 'GroupMember.ReadWrite.All','Group.Read.All'
         }
 
@@ -205,7 +206,7 @@ Begin
         #Load the modules        
         Write-Host "Importing Modules"
         $modules.Keys | ForEach-Object {
-            Import-Module $_
+            Import-Module $_ -MinimumVersion $modules[$_]
         }
 
 		# Connect
@@ -575,7 +576,7 @@ End
 
             if ($WaitForProfile) {
                 Write-Host "Checking for AutoPilot profile $WaitForProfile"
-                $apProfile = Get-AutopilotProfile | Where { $_.displayName -eq $WaitForProfile }
+                $apProfile = Get-AutopilotProfile | Where-Object { $_.displayName -eq $WaitForProfile }
                 $activity = "Waiting for devices to be assigned to '$WaitForProfile'"
             }
             else {
@@ -587,7 +588,9 @@ End
                 $processingCount = 0
                 if ($WaitForProfile) {
                     #Get a list of device ids assigned to the AutoPilot profile to compare against
-                    $profileDeviceIds = $apProfile | Get-AutopilotProfileAssignedDevice | Select -ExpandProperty id
+                    $profileDeviceIds = Get-AutopilotProfileAssignedDevice -id $apProfile.id | ForEach-Object {
+						Write-Output $_.id
+					} 
                 }
 
                 $autopilotDevices | % {
